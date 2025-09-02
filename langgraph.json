@@ -1,0 +1,11 @@
+{
+  "dependencies": [
+    "."
+  ],
+  "graphs": {
+    "sensor_graph": "./graphs/sensor_graph.py:graph",
+    "control_graph": "./graphs/control_graph.py:graph",
+    "orchestrator_graph": "./graphs/orchestrator_graph.py:graph",
+    "maintenance_graph": "./graphs/maintenance_graph.py:graph"
+  }
+}

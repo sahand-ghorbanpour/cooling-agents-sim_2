@@ -1,0 +1,236 @@
+
+version: "3.9"
+services:
+  nats:
+    image: nats:2.10.14
+    command: "-js -sd /data"
+    networks: [core]
+    ports: ["4222:4222","8222:8222"]
+    volumes: ["nats-data:/data"]
+
+  nats-exporter:
+    image: natsio/prometheus-nats-exporter:latest
+    command: ["-varz","-connz","-routez","-subz","http://nats:8222"]
+    networks: [core]
+    depends_on: [nats]
+
+  redis:
+    image: redis:7
+    networks: [core]
+    ports: ["6379:6379"]
+
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    command: ["--redis.addr=redis://redis:6379"]
+    networks: [core]
+    depends_on: [redis]
+
+  # NVIDIA NIM for Chat/Completions/Embeddings (matching your snippet)
+  nim-llm:
+    image: nvcr.io/nim/meta/llama-3.1-8b-instruct:1.2.2
+    profiles: ["nim"]
+    gpus: "all"
+    shm_size: "32gb"
+    restart: unless-stopped
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    cap_add: ["IPC_LOCK"]
+    environment:
+      NGC_API_KEY: ${NGC_API_KEY}
+      NVIDIA_VISIBLE_DEVICES: "0,1"
+      NIM_CACHE_PATH: /tmp/nim_cache
+      TRANSFORMERS_CACHE: /tmp/nim_cache/huggingface/hub
+      HF_HOME: /tmp/nim_cache/huggingface
+      HUGGINGFACE_HUB_CACHE: /tmp/nim_cache/huggingface/hub
+      NCCL_DEBUG: WARN
+      NCCL_IB_DISABLE: "1"
+      NCCL_SOCKET_IFNAME: "^docker,lo"
+      NCCL_P2P_DISABLE: "1"
+      NCCL_SHM_DISABLE: "1"
+      NCCL_NET_GDR_LEVEL: "0"
+      NCCL_TREE_THRESHOLD: "0"
+      NCCL_ALGO: "Ring"
+      NCCL_IGNORE_CPU_AFFINITY: "1"
+      CUDA_DEVICE_ORDER: "PCI_BUS_ID"
+      CUDA_VISIBLE_DEVICES: "0,1"
+      OMP_NUM_THREADS: "8"
+      MKL_NUM_THREADS: "8"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
+    runtime: nvidia
+    ports: ["8000:8000"]
+    networks: [ai]
+    volumes:
+       - ./nim_cache:/tmp/nim_cache
+    healthcheck:
+      test: ["CMD","wget","-qO-","http://localhost:8000/v1/models"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # Optional vLLM service (disabled unless profile used)
+  vllm:
+    image: vllm/vllm-openai:latest
+    profiles: ["vllm"]
+    command: >
+      --model ${VLLM_MODEL}
+      --max-model-len ${VLLM_MAX_MODEL_LEN:-8192}
+      --dtype auto
+      --api-key dummy
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
+    runtime: nvidia
+    volumes:
+      - models-cache:/root/.cache/huggingface
+    ports: ["8001:8000"]
+    networks: [ai]
+    healthcheck:
+      test: ["CMD","wget","-qO-","http://localhost:8000/v1/models"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  llm-gateway:
+    image: python:3.11
+    working_dir: /app
+    volumes: ["./:/app"]
+    command: bash -c "pip install -r requirements.txt && uvicorn services.llm_gateway.main:app --host 0.0.0.0 --port 9000"
+    environment:
+      - METRICS_PORT=9002
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
+      - NIM_URL=http://nim-llm:8000
+      - OPENAI_BASE_URL=http://nim-llm:8000
+      - NIM_MODEL=${NIM_MODEL:-meta/llama-3.1-8b-instruct}
+      - OPENAI_API_KEY=${NGC_API_KEY}
+    networks: [ai, core]
+    depends_on:
+      nim-llm:
+        condition: service_healthy
+      tempo:
+        condition: service_started
+
+  guardrails:
+    image: python:3.11
+    working_dir: /app
+    volumes: ["./:/app"]
+    command: bash -c "pip install -r requirements.txt && uvicorn services.guardrails.main:app --host 0.0.0.0 --port 8001"
+    environment:
+      - METRICS_PORT=9003
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
+    depends_on: [tempo]
+    networks: [ai, core]
+
+  mcp-math:
+    image: python:3.11
+    working_dir: /app
+    volumes: ["./:/app"]
+    command: bash -c "pip install -r requirements.txt && uvicorn services.mcp_math.main:app --host 0.0.0.0 --port 7000"
+    environment:
+      - METRICS_PORT=9004
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
+    depends_on: [tempo]
+    networks: [core]
+
+  control-runtime:
+    image: python:3.11
+    working_dir: /app
+    volumes: ["./:/app"]
+    command: bash -c "pip install -r requirements.txt && python services/control_runtime/main.py"
+    environment:
+      - METRICS_PORT=9010
+    networks: [core]
+    depends_on: [nats]
+
+  langgraph-studio:
+    image: python:3.11
+    working_dir: /app
+    volumes: ["./:/app"]
+    command: bash -c "pip install -r requirements.txt && python -c 'from common.metrics import init_metrics; init_metrics(9001)' && langgraph dev --config langgraph.json"
+    environment:
+      - METRICS_PORT=9001
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
+      - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2:-false}
+      - LANGCHAIN_API_KEY=${LANGSMITH_API_KEY:-}
+      - LANGCHAIN_PROJECT=${LANGSMITH_PROJECT:-Cooling-DigitalTwin}
+    ports: ["2024:2024"]
+    depends_on: [tempo]
+    networks: [core]
+
+  nats-bridge:
+    image: python:3.11
+    working_dir: /app
+    volumes: ["./:/app"]
+    command: bash -c "pip install -r requirements.txt && python bridges/nats_bridge.py"
+    environment:
+      - BRIDGE_METRICS_PORT=9005
+      - NATS_URL=nats://nats:4222
+    depends_on: [nats, langgraph-studio]
+    networks: [core]
+
+  scheduler:
+    image: python:3.11
+    working_dir: /app
+    volumes: ["./:/app"]
+    command: bash -c "pip install -r requirements.txt && python bridges/scheduler.py"
+    environment:
+      - SCHED_METRICS_PORT=9006
+      - NATS_URL=nats://nats:4222
+    depends_on: [nats]
+    networks: [core]
+
+  prometheus:
+    image: prom/prometheus
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+    networks: [core]
+
+  loki:
+    image: grafana/loki:2.9.0
+    command: -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - ./observability/loki-config.yml:/etc/loki/loki-config.yml:ro
+    ports: ["3100:3100"]
+    networks: [core]
+
+  tempo:
+    image: grafana/tempo:2.5.0
+    command: ["-config.file=/etc/tempo/tempo-config.yml"]
+    volumes:
+      - ./observability/tempo-config.yml:/etc/tempo/tempo-config.yml:ro
+    ports: ["3200:3200","4317:4317"]
+    networks: [core]
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning
+    ports: ["3000:3000"]
+    networks: [core]
+
+  prometheus2:
+    image: prom/prometheus
+    profiles: ["devnull"]
+    ports: ["9091:9090"]
+    networks: [core]
+
+networks:
+  core: {driver: bridge}
+  ai: {driver: bridge}
+
+volumes:
+  nats-data: {}
+  models-cache: {}
+  nim_cache: {}

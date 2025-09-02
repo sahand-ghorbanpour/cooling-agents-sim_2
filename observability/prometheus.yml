@@ -1,0 +1,24 @@
+
+global:
+  scrape_interval: 5s
+scrape_configs:
+  - job_name: prometheus
+    static_configs: [{targets: ["prometheus:9090"]}]
+  - job_name: langgraph-studio
+    static_configs: [{targets: ["langgraph-studio:9001"]}]
+  - job_name: llm-gateway
+    static_configs: [{targets: ["llm-gateway:9002"]}]
+  - job_name: guardrails
+    static_configs: [{targets: ["guardrails:9003"]}]
+  - job_name: mcp-math
+    static_configs: [{targets: ["mcp-math:9004"]}]
+  - job_name: nats-bridge
+    static_configs: [{targets: ["nats-bridge:9005"]}]
+  - job_name: scheduler
+    static_configs: [{targets: ["scheduler:9006"]}]
+  - job_name: control-runtime
+    static_configs: [{targets: ["control-runtime:9010"]}]
+  - job_name: nats-exporter
+    static_configs: [{targets: ["nats-exporter:7777"]}]
+  - job_name: redis-exporter
+    static_configs: [{targets: ["redis-exporter:9121"]}]

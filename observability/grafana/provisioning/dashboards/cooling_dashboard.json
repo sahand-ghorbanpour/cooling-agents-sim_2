@@ -1,0 +1,64 @@
+{
+  "title": "Cooling System Observability",
+  "schemaVersion": 38,
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Global Temp (C)",
+      "targets": [
+        {
+          "expr": "cooling_system_global_temp_celsius"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Cabinet Temps",
+      "targets": [
+        {
+          "expr": "cabinet_temperature_celsius"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Energy (kW)",
+      "targets": [
+        {
+          "expr": "cooling_energy_kw"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Efficiency Score",
+      "targets": [
+        {
+          "expr": "cooling_efficiency_score"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM p95 latency",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(llm_request_duration_seconds_bucket[5m])) by (le,model))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "NATS msgs out (agent)",
+      "targets": [
+        {
+          "expr": "sum(increase(nats_messages_total[5m])) by (agent,subject)"
+        }
+      ]
+    }
+  ]
+}
