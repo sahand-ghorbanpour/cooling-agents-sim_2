@@ -1,0 +1,9 @@
+# ========== Time Series and Data Storage ==========
+influxdb-client==1.42.0
+
+# ========== Message Bus and Communication ==========
+nats-py==2.6.0
+
+# ========== Version Pinning for Stability ==========
+typing-extensions==4.8.0
+setuptools==68.2.0

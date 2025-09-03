@@ -1,23 +1,57 @@
-
 version: "3.9"
+
+x-health: &health
+  interval: 10s
+  timeout: 5s
+  retries: 30
+  start_period: 30s
+
+networks:
+  core:
+    driver: bridge
+  ai:
+    driver: bridge
+  sensors:
+    driver: bridge
+  simulation:
+    driver: bridge
+
+volumes:
+  nats-data:
+  redis-data:
+  models-cache:
+  nim_cache:
+  influx-data:
+  grafana-data:
+  simulation-data:
+
 services:
+  # ========== Message Bus & Cache ==========
   nats:
     image: nats:2.10.14
-    command: "-js -sd /data"
-    networks: [core]
-    ports: ["4222:4222","8222:8222"]
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports: ["4222:4222", "8222:8222"]
     volumes: ["nats-data:/data"]
+    networks: [core]
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "4222"]
+      <<: *health
 
   nats-exporter:
     image: natsio/prometheus-nats-exporter:latest
-    command: ["-varz","-connz","-routez","-subz","http://nats:8222"]
+    command: ["-varz", "-connz", "-routez", "-subz", "http://nats:8222"]
     networks: [core]
     depends_on: [nats]
 
   redis:
     image: redis:7
-    networks: [core]
+    command: ["redis-server", "--save", "60", "1000", "--appendonly", "yes"]
     ports: ["6379:6379"]
+    volumes: ["redis-data:/data"]
+    networks: [core]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      <<: *health
 
   redis-exporter:
     image: oliver006/redis_exporter:latest
@@ -25,7 +59,7 @@ services:
     networks: [core]
     depends_on: [redis]
 
-  # NVIDIA NIM for Chat/Completions/Embeddings (matching your snippet)
+  # ========== LLM Services ==========
   nim-llm:
     image: nvcr.io/nim/meta/llama-3.1-8b-instruct:1.2.2
     profiles: ["nim"]
@@ -38,11 +72,12 @@ services:
     cap_add: ["IPC_LOCK"]
     environment:
       NGC_API_KEY: ${NGC_API_KEY}
-      NVIDIA_VISIBLE_DEVICES: "0,1"
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-0,1}
       NIM_CACHE_PATH: /tmp/nim_cache
       TRANSFORMERS_CACHE: /tmp/nim_cache/huggingface/hub
       HF_HOME: /tmp/nim_cache/huggingface
       HUGGINGFACE_HUB_CACHE: /tmp/nim_cache/huggingface/hub
+      # NCCL settings for multi-GPU
       NCCL_DEBUG: WARN
       NCCL_IB_DISABLE: "1"
       NCCL_SOCKET_IFNAME: "^docker,lo"
@@ -53,7 +88,7 @@ services:
       NCCL_ALGO: "Ring"
       NCCL_IGNORE_CPU_AFFINITY: "1"
       CUDA_DEVICE_ORDER: "PCI_BUS_ID"
-      CUDA_VISIBLE_DEVICES: "0,1"
+      CUDA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-0,1}
       OMP_NUM_THREADS: "8"
       MKL_NUM_THREADS: "8"
     deploy:
@@ -65,19 +100,16 @@ services:
     ports: ["8000:8000"]
     networks: [ai]
     volumes:
-       - ./nim_cache:/tmp/nim_cache
+      - nim_cache:/tmp/nim_cache
     healthcheck:
-      test: ["CMD","wget","-qO-","http://localhost:8000/v1/models"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/v1/models"]
+      <<: *health
 
-  # Optional vLLM service (disabled unless profile used)
   vllm:
     image: vllm/vllm-openai:latest
     profiles: ["vllm"]
     command: >
-      --model ${VLLM_MODEL}
+      --model ${VLLM_MODEL:-meta-llama/Llama-3.1-8B-Instruct}
       --max-model-len ${VLLM_MAX_MODEL_LEN:-8192}
       --dtype auto
       --api-key dummy
@@ -94,87 +126,105 @@ services:
     ports: ["8001:8000"]
     networks: [ai]
     healthcheck:
-      test: ["CMD","wget","-qO-","http://localhost:8000/v1/models"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/v1/models"]
+      <<: *health
 
   llm-gateway:
-    image: python:3.11
-    working_dir: /app
-    volumes: ["./:/app"]
-    command: bash -c "pip install -r requirements.txt && uvicorn services.llm_gateway.main:app --host 0.0.0.0 --port 9000"
+    build:
+      context: .
+      dockerfile: services/llm-gateway/Dockerfile
     environment:
-      - METRICS_PORT=9002
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
-      - NIM_URL=http://nim-llm:8000
-      - OPENAI_BASE_URL=http://nim-llm:8000
-      - NIM_MODEL=${NIM_MODEL:-meta/llama-3.1-8b-instruct}
-      - OPENAI_API_KEY=${NGC_API_KEY}
+      METRICS_PORT: 9002
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
+      NIM_URL: http://nim-llm:8000
+      OPENAI_BASE_URL: http://nim-llm:8000
+      NIM_MODEL: ${NIM_MODEL:-meta/llama-3.1-8b-instruct}
+      OPENAI_API_KEY: ${NGC_API_KEY}
+      REDIS_URL: redis://redis:6379
+    ports: ["9000:9000"]
     networks: [ai, core]
     depends_on:
       nim-llm:
         condition: service_healthy
       tempo:
         condition: service_started
-
-  guardrails:
-    image: python:3.11
-    working_dir: /app
+      redis:
+        condition: service_healthy
     volumes: ["./:/app"]
-    command: bash -c "pip install -r requirements.txt && uvicorn services.guardrails.main:app --host 0.0.0.0 --port 8001"
+    working_dir: /app
+    command: bash -c "pip install -r requirements.txt && uvicorn services.llm_gateway.main:app --host 0.0.0.0 --port 9000"
+
+  # ========== AI Services ==========
+  guardrails:
+    build:
+      context: .
+      dockerfile: services/guardrails/Dockerfile
     environment:
-      - METRICS_PORT=9003
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
-    depends_on: [tempo]
+      METRICS_PORT: 9003
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
     networks: [ai, core]
+    depends_on: [tempo]
+    volumes: ["./:/app"]
+    working_dir: /app
+    command: bash -c "pip install -r requirements.txt && uvicorn services.guardrails.main:app --host 0.0.0.0 --port 8001"
 
   mcp-math:
-    image: python:3.11
-    working_dir: /app
-    volumes: ["./:/app"]
-    command: bash -c "pip install -r requirements.txt && uvicorn services.mcp_math.main:app --host 0.0.0.0 --port 7000"
+    build:
+      context: .
+      dockerfile: services/mcp-math/Dockerfile
     environment:
-      - METRICS_PORT=9004
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
+      METRICS_PORT: 9004
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
+      TARGET_TEMP_K: ${TARGET_TEMP_K:-303.15}
+      TEMP_TOLERANCE: ${TEMP_TOLERANCE:-0.5}
+    ports: ["7000:7000"]
+    networks: [core]
     depends_on: [tempo]
-    networks: [core]
-
-  control-runtime:
-    image: python:3.11
-    working_dir: /app
     volumes: ["./:/app"]
-    command: bash -c "pip install -r requirements.txt && python services/control_runtime/main.py"
-    environment:
-      - METRICS_PORT=9010
-    networks: [core]
-    depends_on: [nats]
+    working_dir: /app
+    command: bash -c "pip install -r requirements.txt && uvicorn services.mcp_math.main:app --host 0.0.0.0 --port 7000"
 
+  # ========== LangGraph Studio ==========
   langgraph-studio:
     image: python:3.11
     working_dir: /app
     volumes: ["./:/app"]
-    command: bash -c "pip install -r requirements.txt && python -c 'from common.metrics import init_metrics; init_metrics(9001)' && langgraph dev --config langgraph.json"
+    command: bash -c "pip install -r requirements.txt && python -c 'from common.metrics import init_metrics; init_metrics(9001)' && langgraph dev --config langgraph.json --host 0.0.0.0 --port 2024"
     environment:
-      - METRICS_PORT=9001
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
-      - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2:-false}
-      - LANGCHAIN_API_KEY=${LANGSMITH_API_KEY:-}
-      - LANGCHAIN_PROJECT=${LANGSMITH_PROJECT:-Cooling-DigitalTwin}
+      METRICS_PORT: 9001
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
+      NATS_URL: nats://nats:4222
+      REDIS_URL: redis://redis:6379
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGCHAIN_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGSMITH_PROJECT:-Cooling-DigitalTwin}
+      TARGET_TEMP_C: ${TARGET_TEMP_C:-24.0}
+      NIM_MODEL: ${NIM_MODEL:-meta/llama-3.1-8b-instruct}
     ports: ["2024:2024"]
-    depends_on: [tempo]
     networks: [core]
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      tempo:
+        condition: service_started
 
+  # ========== Agent Services ==========
   nats-bridge:
     image: python:3.11
     working_dir: /app
     volumes: ["./:/app"]
     command: bash -c "pip install -r requirements.txt && python bridges/nats_bridge.py"
     environment:
-      - BRIDGE_METRICS_PORT=9005
-      - NATS_URL=nats://nats:4222
-    depends_on: [nats, langgraph-studio]
+      BRIDGE_METRICS_PORT: 9005
+      NATS_URL: nats://nats:4222
     networks: [core]
+    depends_on:
+      nats:
+        condition: service_healthy
+      langgraph-studio:
+        condition: service_started
 
   scheduler:
     image: python:3.11
@@ -182,13 +232,65 @@ services:
     volumes: ["./:/app"]
     command: bash -c "pip install -r requirements.txt && python bridges/scheduler.py"
     environment:
-      - SCHED_METRICS_PORT=9006
-      - NATS_URL=nats://nats:4222
-    depends_on: [nats]
+      SCHED_METRICS_PORT: 9006
+      NATS_URL: nats://nats:4222
+      REDIS_URL: redis://redis:6379
     networks: [core]
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
+  # ========== Control Services ==========
+  control-runtime:
+    image: python:3.11
+    working_dir: /app
+    volumes: ["./:/app"]
+    command: bash -c "pip install -r requirements.txt && python services/control_runtime/main.py"
+    environment:
+      METRICS_PORT: 9010
+      NATS_URL: nats://nats:4222
+      REDIS_URL: redis://redis:6379
+      TARGET_TEMP_C: ${TARGET_TEMP_C:-24.0}
+      PID_KP: ${PID_KP:-0.8}
+      PID_KI: ${PID_KI:-0.1}
+      PID_KD: ${PID_KD:-0.05}
+    networks: [core]
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  sensor-gateway:
+    image: python:3.11
+    working_dir: /app
+    volumes: ["./:/app"]
+    command: bash -c "pip install -r requirements.txt && python services/sensor_gateway/main.py"
+    environment:
+      METRICS_PORT: 9011
+      SENSOR_GATEWAY_PORT: 9011
+      NATS_URL: nats://nats:4222
+      REDIS_URL: redis://redis:6379
+    ports: ["9011:9011"]
+    networks: [core, sensors]
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ========== Observability Stack ==========
   prometheus:
-    image: prom/prometheus
+    image: prom/prometheus:latest
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=7d'
+      - '--web.enable-lifecycle'
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports: ["9090:9090"]
@@ -207,7 +309,7 @@ services:
     command: ["-config.file=/etc/tempo/tempo-config.yml"]
     volumes:
       - ./observability/tempo-config.yml:/etc/tempo/tempo-config.yml:ro
-    ports: ["3200:3200","4317:4317"]
+    ports: ["3200:3200", "4317:4317"]
     networks: [core]
 
   grafana:
@@ -215,22 +317,84 @@ services:
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
     volumes:
-      - ./observability/grafana/provisioning:/etc/grafana/provisioning
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
     ports: ["3000:3000"]
     networks: [core]
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
 
-  prometheus2:
-    image: prom/prometheus
-    profiles: ["devnull"]
-    ports: ["9091:9090"]
+  # ========== Time Series Database ==========
+  influxdb:
+    image: influxdb:2.7
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUX_PASSWORD:-admin123}
+      - DOCKER_INFLUXDB_INIT_ORG=cooling-system
+      - DOCKER_INFLUXDB_INIT_BUCKET=telemetry
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUX_TOKEN:-dev-token-change-in-production}
+    ports: ["8086:8086"]
+    networks: [core]
+    volumes:
+      - influx-data:/var/lib/influxdb2
+
+  influx-writer:
+    image: python:3.11
+    working_dir: /app
+    volumes: ["./:/app"]
+    command: bash -c "pip install -r requirements.txt && python telemetry/influx_writer.py"
+    environment:
+      INFLUX_URL: http://influxdb:8086
+      INFLUX_TOKEN: ${INFLUX_TOKEN:-dev-token-change-in-production}
+      INFLUX_ORG: cooling-system
+      INFLUX_BUCKET: telemetry
+      NATS_URL: nats://nats:4222
+      METRICS_PORT: 9007
+    networks: [core]
+    depends_on:
+      nats:
+        condition: service_healthy
+      influxdb:
+        condition: service_started
+
+  # ========== Development Tools ==========
+  # Jupyter notebook for analysis (optional)
+  jupyter:
+    image: jupyter/scipy-notebook:latest
+    profiles: ["development"]
+    ports: ["8888:8888"]
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+      JUPYTER_TOKEN: ${JUPYTER_TOKEN:-cooling-analysis}
+    volumes:
+      - "./notebooks:/home/jovyan/work"
+      - "./data:/home/jovyan/data"
     networks: [core]
 
-networks:
-  core: {driver: bridge}
-  ai: {driver: bridge}
+  # Redis Commander for Redis inspection (optional)
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    profiles: ["development"] 
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    ports: ["8081:8081"]
+    networks: [core]
+    depends_on: [redis]
 
-volumes:
-  nats-data: {}
-  models-cache: {}
-  nim_cache: {}
+  # NATS monitoring (optional)
+  nats-surveyor:
+    image: natsio/nats-surveyor:latest
+    profiles: ["development"]
+    command: ["--server", "nats://nats:4222", "--port", "7777"]
+    ports: ["7777:7777"]
+    networks: [core]
+    depends_on: [nats]
+
+# ========== Volume Definitions ==========
+# All volumes are defined above to ensure data persistence

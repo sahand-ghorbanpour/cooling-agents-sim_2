@@ -1,0 +1,22 @@
+# ========== Message Bus and Communication ==========
+nats-py==2.6.0
+
+# ========== HTTP Client ==========
+requests==2.32.3
+
+# ========== Scientific Computing ==========
+numpy==1.26.4
+
+# ========== Observability and Monitoring ==========
+prometheus_client==0.20.0
+
+# ========== Configuration Management ==========
+pyyaml==6.0.1
+python-dotenv==1.0.0
+
+# ========== Development and Debugging ==========
+python-json-logger==2.0.7
+
+# ========== Version Pinning for Stability ==========
+typing-extensions==4.8.0
+setuptools==68.2.0

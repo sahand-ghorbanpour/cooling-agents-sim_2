@@ -1,0 +1,5 @@
+nats-py==2.6.0
+pydantic==2.8.2
+gymnasium==0.28.1
+asyncio-mqtt==0.16.1
+prometheus-client==0.20.0
