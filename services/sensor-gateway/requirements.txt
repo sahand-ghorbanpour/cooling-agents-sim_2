@@ -1,0 +1,42 @@
+# ========== Web Framework and API ==========
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+pydantic==2.8.2
+
+# ========== Message Bus and Communication ==========
+nats-py==2.6.0
+
+# ========== Scientific Computing ==========
+numpy==1.26.4
+
+# ========== Observability and Monitoring ==========
+prometheus_client==0.20.0
+opentelemetry-sdk==1.25.0
+opentelemetry-exporter-otlp==1.25.0
+opentelemetry-instrumentation-fastapi==0.46b0
+opentelemetry-instrumentation-logging==0.46b0
+
+# ========== Configuration Management ==========
+pyyaml==6.0.1
+python-dotenv==1.0.0
+
+# ========== Data Serialization and Processing ==========
+orjson==3.10.7
+
+# ========== Development and Debugging ==========
+python-json-logger==2.0.7
+
+# ========== Additional Utilities ==========
+click==8.1.7
+colorama==0.4.6
+
+# ========== Version Pinning for Stability ==========
+typing-extensions==4.8.0
+setuptools==68.2.0
+
+# ========== Platform-specific Dependencies ==========
+# Windows-specific
+pywin32==306; sys_platform == "win32"
+
+# Linux-specific (for system integration)
+psutil==5.9.5
