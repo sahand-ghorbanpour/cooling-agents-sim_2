@@ -1,4 +1,5 @@
-import time, asyncio, logging, os
+# graphs/sensor_graph.py - Modified for hybrid architecture
+import time, asyncio, json, logging, os
 from typing import Dict, Any
 from langgraph.graph import StateGraph, END
 from common.metrics import (init_metrics, node_runs_total, node_duration_seconds, 
@@ -13,123 +14,83 @@ init_metrics()
 tracer = init_tracer("sensor-graph")
 log = logging.getLogger("sensor-graph")
 
-# Import your real physics simulation
-from env.frontier_env import SmallFrontierModel
-import numpy as np
+# Global state to receive simulation data
+_latest_simulation_data = None
+_simulation_health = {"status": "unknown", "last_update": 0}
 
-# Global simulation environment - initialized once, reused
-_env = None
-_current_actions = None
-_step_count = 0
-
-def initialize_simulation():
-    """Initialize the FMU-based simulation environment"""
-    global _env
-    if _env is None:
-        try:
-            _env = SmallFrontierModel(
-                start_time=0,
-                stop_time=86400,  # 24 hours
-                step_size=15.0,   # 15 seconds
-                use_reward_shaping='reward_shaping_v1'
-            )
-            # Reset to get initial state
-            initial_state, _ = _env.reset()
-            log.info("SmallFrontierModel initialized successfully")
-        except Exception as e:
-            log.error(f"Failed to initialize SmallFrontierModel: {e}")
-            _env = None
-    return _env
-
-async def step_env(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Step the real physics simulation and extract telemetry"""
-    gname="sensor_graph"; nname="step_env"
+async def coordinate_sensors(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Coordinate with external sensor-agent service"""
+    gname="sensor_graph"; nname="coordinate_sensors"
     t0=time.time(); node_runs_total.labels(gname,nname).inc()
     
     with tracer.start_as_current_span(nname):
-        global _env, _current_actions, _step_count
+        # Send trigger to external sensor-agent
+        trigger_payload = {
+            "type": "sensor.trigger",
+            "timestamp": time.time(),
+            "control_actions": state.get("control_actions"),  # Forward any control actions
+            "source": "sensor_graph"
+        }
         
-        # Initialize simulation if needed
-        if _env is None:
-            _env = initialize_simulation()
+        await nats_publish("simulation.trigger", trigger_payload, agent="sensor_coordinator")
         
-        temps = {}
-        meta = {}
-        rewards = {}
+        # Store coordination info
+        state["coordination_sent"] = True
+        state["trigger_timestamp"] = time.time()
         
-        try:
-            if _env is not None:
-                # Use actions from control if available, otherwise default actions
-                if _current_actions is not None:
-                    actions = _current_actions
-                    _current_actions = None  # Reset after use
-                else:
-                    # Default actions - maintain current state
-                    actions = {
-                        'cdu-cabinet-1': np.array([0.0, 0.0, 1/3, 1/3, 1/3], dtype=np.float32),
-                        'cdu-cabinet-2': np.array([0.0, 0.0, 1/3, 1/3, 1/3], dtype=np.float32),
-                        'cdu-cabinet-3': np.array([0.0, 0.0, 1/3, 1/3, 1/3], dtype=np.float32),
-                        'cdu-cabinet-4': np.array([0.0, 0.0, 1/3, 1/3, 1/3], dtype=np.float32),
-                        'cdu-cabinet-5': np.array([0.0, 0.0, 1/3, 1/3, 1/3], dtype=np.float32),
-                        'cooling-tower-1': 4  # Maintain
-                    }
+        node_duration_seconds.labels(gname,nname).observe(time.time()-t0)
+        return state
+
+async def wait_for_simulation(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Wait for simulation results from external sensor-agent"""
+    gname="sensor_graph"; nname="wait_for_simulation"
+    t0=time.time(); node_runs_total.labels(gname,nname).inc()
+    
+    with tracer.start_as_current_span(nname):
+        global _latest_simulation_data, _simulation_health
+        
+        # Wait for fresh simulation data (with timeout)
+        timeout = 10.0  # 10 second timeout
+        start_wait = time.time()
+        trigger_time = state.get("trigger_timestamp", 0)
+        
+        while time.time() - start_wait < timeout:
+            if (_latest_simulation_data and 
+                _latest_simulation_data.get("timestamp", 0) > trigger_time):
+                # Got fresh data
+                state["temps"] = _latest_simulation_data.get("temps", {})
+                state["meta"] = _latest_simulation_data.get("meta", {})
+                state["ts"] = _latest_simulation_data.get("timestamp", time.time())
+                state["simulation_health"] = "healthy"
+                break
                 
-                # Step simulation
-                obs, rewards_dict, terminateds, truncateds, info = _env.step(actions)
-                
-                # Extract temperature data
-                for i in range(1, 6):
-                    cabinet_key = f"cdu-cabinet-{i}"
-                    if cabinet_key in obs:
-                        # Convert normalized observations to Celsius
-                        cabinet_obs = obs[cabinet_key]
-                        if len(cabinet_obs) >= 3:
-                            # First 3 elements are boundary temperatures (normalized)
-                            temp_norm = cabinet_obs[:3]
-                            # Convert from normalized [-1,1] to Kelvin, then Celsius
-                            temp_k = ((temp_norm + 1) / 2) * (313.15 - 293.15) + 293.15
-                            avg_temp_c = float(np.mean(temp_k) - 273.15)
-                            temps[f"cabinet_{i}"] = avg_temp_c
-                
-                # Extract cooling tower data
-                if "cooling-tower-1" in obs:
-                    ct_obs = obs["cooling-tower-1"]
-                    if len(ct_obs) >= 3:
-                        # Water temperature
-                        water_temp_norm = ct_obs[2]
-                        water_temp_k = ((water_temp_norm + 1) / 2) * (313.15 - 293.15) + 293.15
-                        temps["cooling_tower"] = float(water_temp_k - 273.15)
-                
-                # Calculate energy consumption (simplified)
-                total_energy = 0.0
-                if "cooling-tower-1" in obs:
-                    ct_obs = obs["cooling-tower-1"]
-                    if len(ct_obs) >= 2:
-                        fan_power = np.sum(ct_obs[:2])  # Fan powers
-                        # Convert normalized fan power to kW (rough estimate)
-                        total_energy = float((fan_power + 2) / 4 * 150)  # 150kW max estimate
-                
-                meta.update({
-                    "energy_kw": total_energy,
-                    "step_count": _step_count,
-                    "rewards": {k: float(v) for k, v in rewards_dict.items()},
-                    "simulation_time": _env.current_time if hasattr(_env, 'current_time') else _step_count * 15.0
-                })
-                
-                _step_count += 1
-                
+            await asyncio.sleep(0.1)  # Check every 100ms
+        
+        else:
+            # Timeout - use last known data or defaults
+            log.warning("Simulation data timeout - using fallback")
+            if _latest_simulation_data:
+                state["temps"] = _latest_simulation_data.get("temps", {})
+                state["meta"] = _latest_simulation_data.get("meta", {})
+                state["simulation_health"] = "stale_data"
             else:
-                # Fallback mock data if simulation failed
-                temps = {f"cabinet_{i}": 25.0 + np.random.normal(0, 0.5) for i in range(1,6)}
-                temps["cooling_tower"] = 22.0
-                meta = {"energy_kw": 100.0, "step_count": _step_count}
-                
-        except Exception as e:
-            log.error(f"Simulation step failed: {e}")
-            # Emergency fallback
-            temps = {f"cabinet_{i}": 25.0 for i in range(1,6)}
-            temps["cooling_tower"] = 22.0
-            meta = {"energy_kw": 100.0, "step_count": _step_count, "error": str(e)}
+                # Complete fallback
+                state["temps"] = {f"cabinet_{i}": 25.0 for i in range(1,6)}
+                state["temps"]["cooling_tower"] = 22.0
+                state["meta"] = {"energy_kw": 100.0, "error": "no_simulation_data"}
+                state["simulation_health"] = "fallback"
+        
+        node_duration_seconds.labels(gname,nname).observe(time.time()-t0)
+        return state
+
+async def process_telemetry(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Process telemetry data and update metrics"""
+    gname="sensor_graph"; nname="process_telemetry"
+    t0=time.time(); node_runs_total.labels(gname,nname).inc()
+    
+    with tracer.start_as_current_span(nname):
+        temps = state.get("temps", {})
+        meta = state.get("meta", {})
         
         # Update Prometheus metrics
         cabinet_vals = [v for k,v in temps.items() if k.startswith("cabinet_")]
@@ -144,35 +105,21 @@ async def step_env(state: Dict[str, Any]) -> Dict[str, Any]:
             energy = meta.get("energy_kw", 0)
             energy_kw.set(energy)
             
-            # Efficiency score: better when temperature closer to target (24°C) and energy lower
+            # Efficiency score
             temp_efficiency = max(0.0, min(1.0, 1.0 - abs(avg_temp - 24.0) / 10.0))
             energy_efficiency = max(0.0, min(1.0, 1.0 - energy / 200.0))
             overall_efficiency = (temp_efficiency + energy_efficiency) / 2.0
             efficiency_score.set(overall_efficiency)
         
-        node_duration_seconds.labels(gname,nname).observe(time.time()-t0)
-        return {"temps": temps, "meta": meta, "ts": time.time()}
-
-async def receive_actions(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Receive and prepare actions for next simulation step"""
-    gname="sensor_graph"; nname="receive_actions"
-    t0=time.time(); node_runs_total.labels(gname,nname).inc()
-    
-    with tracer.start_as_current_span(nname):
-        global _current_actions
-        
-        # Check for incoming actions from control system
-        # This would be set by the NATS listener or control coordination
-        actions_received = state.get("control_actions")
-        if actions_received:
-            _current_actions = actions_received
-            log.info(f"Received control actions for next simulation step")
+        # Add processing metadata
+        state["processed"] = True
+        state["metrics_updated"] = True
         
         node_duration_seconds.labels(gname,nname).observe(time.time()-t0)
         return state
 
 async def publish_state(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Publish sensor telemetry to NATS"""
+    """Publish processed sensor state"""
     gname="sensor_graph"; nname="publish_state"
     t0=time.time(); node_runs_total.labels(gname,nname).inc()
     
@@ -182,12 +129,13 @@ async def publish_state(state: Dict[str, Any]) -> Dict[str, Any]:
             "type": "telemetry.state",
             "data": state,
             "timestamp": time.time(),
-            "source": "sensor_graph"
+            "source": "sensor_graph_coordinator",
+            "simulation_health": state.get("simulation_health", "unknown")
         }
         
-        # Publish to multiple topics for different consumers
+        # Publish to multiple topics
         await nats_publish(ROUTING["state_out"], payload, agent="sensor")
-        await nats_publish("simulation.state", payload, agent="sensor")  # For compatibility
+        await nats_publish("simulation.state.processed", payload, agent="sensor")
         
         # Store latest state for other services
         set_latest_state(state)
@@ -195,24 +143,30 @@ async def publish_state(state: Dict[str, Any]) -> Dict[str, Any]:
         node_duration_seconds.labels(gname,nname).observe(time.time()-t0)
         return state
 
-# Create the sensor graph
+# Function to receive simulation data from external sensor-agent
+def update_simulation_data(data: Dict[str, Any]):
+    """Called by NATS listener to update simulation data"""
+    global _latest_simulation_data, _simulation_health
+    _latest_simulation_data = data
+    _simulation_health = {
+        "status": "healthy",
+        "last_update": time.time()
+    }
+    log.debug("Received simulation data update from sensor-agent")
+
+# Build the sensor coordination graph
 builder = StateGraph(dict)
-builder.add_node("receive_actions", receive_actions)
-builder.add_node("step_env", step_env)
+builder.add_node("coordinate_sensors", coordinate_sensors)
+builder.add_node("wait_for_simulation", wait_for_simulation)
+builder.add_node("process_telemetry", process_telemetry)
 builder.add_node("publish_state", publish_state)
 
 # Define the flow
-builder.add_edge("receive_actions", "step_env")
-builder.add_edge("step_env", "publish_state")
+builder.add_edge("coordinate_sensors", "wait_for_simulation")
+builder.add_edge("wait_for_simulation", "process_telemetry")
+builder.add_edge("process_telemetry", "publish_state")
 builder.add_edge("publish_state", END)
-builder.set_entry_point("receive_actions")
+builder.set_entry_point("coordinate_sensors")
 
 graph = builder.compile()
 
-# Function to inject actions from external control services
-def inject_control_actions(actions):
-    """Called by control runtime to inject actions for next simulation step"""
-    global _current_actions
-    _current_actions = actions
-    log.info(f"Injected control actions: {list(actions.keys()) if actions else 'None'}")
-    

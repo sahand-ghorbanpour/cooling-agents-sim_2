@@ -37,7 +37,7 @@ pulp==2.7.0
 sympy==1.12
 
 # ========== Physics Simulation (Your FMU Environment) ==========
-pyfmi==2.16.2
+#pyfmi==2.16.2
 gymnasium==0.28.1
 
 # ========== Sensor Communication Protocols ==========

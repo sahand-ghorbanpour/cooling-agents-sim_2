@@ -184,7 +184,42 @@ services:
     working_dir: /app
     command: bash -c "pip install -r requirements.txt && uvicorn services.mcp_math.main:app --host 0.0.0.0 --port 7000"
 
-  # ========== LangGraph Studio ==========
+  # ========== Sensor Agent Service (Separate from LangGraph) ==========
+  sensor-agent:
+    build:
+      context: .
+      dockerfile: services/sensor-agent/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      METRICS_PORT: 9012
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
+      # FMU-specific environment variables
+      FMU_PATH: /app/env/LC_Frontier_5Cabinet_4_17_25.fmu
+      EXOGENOUS_DATA_PATH: /app/env/input_04-07-24.csv
+      # Simulation parameters
+      AUTONOMOUS_SIMULATION_INTERVAL_MS: 5000
+      SIMULATION_START_TIME: 0
+      SIMULATION_STOP_TIME: 86400
+      SIMULATION_STEP_SIZE: 15.0
+    ports: ["9012:9012"]  # Metrics port
+    networks: [core, simulation]
+    volumes:
+      - ./env:/app/env:ro  # Mount your FMU files
+      - ./simulation:/app/simulation:ro
+      - simulation-data:/app/simulation_data
+    depends_on:
+      nats:
+        condition: service_healthy
+      tempo:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "from env.frontier_env import SmallFrontierModel; print('OK')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ========== LangGraph Studio (Modified) ==========
   langgraph-studio:
     image: python:3.11
     working_dir: /app
@@ -195,11 +230,15 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
       NATS_URL: nats://nats:4222
       REDIS_URL: redis://redis:6379
+      # LangSmith Integration (IMPORTANT - Keep these!)
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGCHAIN_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGSMITH_PROJECT:-Cooling-DigitalTwin}
+      # Additional environment variables
       TARGET_TEMP_C: ${TARGET_TEMP_C:-24.0}
       NIM_MODEL: ${NIM_MODEL:-meta/llama-3.1-8b-instruct}
+      # LangGraph will coordinate, but NOT run the simulation directly
+      SENSOR_AGENT_MODE: "external"
     ports: ["2024:2024"]
     networks: [core]
     depends_on:
@@ -207,6 +246,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      sensor-agent:
+        condition: service_healthy  # Wait for sensor-agent to be ready
       tempo:
         condition: service_started
 
