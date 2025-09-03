@@ -1,0 +1,21 @@
+# services/sensor-agent/requirements.txt
+# ========== Message Bus and Communication ==========
+nats-py==2.6.0
+
+# ========== Scientific Computing ==========
+numpy==1.26.4  # Already available from conda, but ensure version
+
+# ========== Environment/Simulation ==========
+gymnasium==0.28.1
+
+# ========== Observability and Monitoring ==========
+prometheus_client==0.20.0
+opentelemetry-sdk==1.25.0
+opentelemetry-exporter-otlp==1.25.0
+
+# ========== Development and Debugging ==========
+python-json-logger==2.0.7
+
+# ========== Version Pinning for Stability ==========
+typing-extensions==4.8.0
+setuptools==68.2.0
