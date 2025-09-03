@@ -21,7 +21,7 @@ COORDINATION_STRATEGIES = {
     "emergency": "Override autonomous operation for emergency response"
 }
 
-def fetch_system_state(state: Dict[str, Any]) -> Dict[str, Any]:
+async def fetch_system_state(state: Dict[str, Any]) -> Dict[str, Any]:
     """Fetch comprehensive system state from all sources"""
     gname="orchestrator_graph"; nname="fetch_system_state"
     t0=time.time(); node_runs_total.labels(gname,nname).inc()
@@ -56,7 +56,7 @@ def fetch_system_state(state: Dict[str, Any]) -> Dict[str, Any]:
         node_duration_seconds.labels(gname,nname).observe(time.time()-t0)
         return state
 
-def assess_coordination_need(state: Dict[str, Any]) -> Dict[str, Any]:
+async def assess_coordination_need(state: Dict[str, Any]) -> Dict[str, Any]:
     """Assess whether system-level coordination is needed"""
     gname="orchestrator_graph"; nname="assess_coordination_need"
     t0=time.time(); node_runs_total.labels(gname,nname).inc()
@@ -129,7 +129,7 @@ def assess_coordination_need(state: Dict[str, Any]) -> Dict[str, Any]:
         node_duration_seconds.labels(gname,nname).observe(time.time()-t0)
         return state
 
-def strategic_planning(state: Dict[str, Any]) -> Dict[str, Any]:
+async def strategic_planning(state: Dict[str, Any]) -> Dict[str, Any]:
     """Generate strategic coordination plan"""
     gname="orchestrator_graph"; nname="strategic_planning"
     t0=time.time(); node_runs_total.labels(gname,nname).inc()
@@ -203,7 +203,7 @@ def strategic_planning(state: Dict[str, Any]) -> Dict[str, Any]:
         node_duration_seconds.labels(gname,nname).observe(time.time()-t0)
         return state
 
-def execute_coordination(state: Dict[str, Any]) -> Dict[str, Any]:
+async def execute_coordination(state: Dict[str, Any]) -> Dict[str, Any]:
     """Execute the strategic coordination plan"""
     gname="orchestrator_graph"; nname="execute_coordination" 
     t0=time.time(); node_runs_total.labels(gname,nname).inc()
@@ -253,7 +253,7 @@ def execute_coordination(state: Dict[str, Any]) -> Dict[str, Any]:
         node_duration_seconds.labels(gname,nname).observe(time.time()-t0)
         return state
 
-def monitor_and_adapt(state: Dict[str, Any]) -> Dict[str, Any]:
+async def monitor_and_adapt(state: Dict[str, Any]) -> Dict[str, Any]:
     """Monitor coordination results and adapt system behavior"""
     gname="orchestrator_graph"; nname="monitor_and_adapt"
     t0=time.time(); node_runs_total.labels(gname,nname).inc()
@@ -302,7 +302,7 @@ def monitor_and_adapt(state: Dict[str, Any]) -> Dict[str, Any]:
             "next_assessment": time.time() + get_config("coordination_interval_seconds", 300)
         }
         
-        asyncio.run(nats_publish("dc.orchestrator.status", coordination_status, agent="orchestrator"))
+        await nats_publish("dc.orchestrator.status", coordination_status, agent="orchestrator")
         
         state.update({
             "coordination_effectiveness": effectiveness_score,

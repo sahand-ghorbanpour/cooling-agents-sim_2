@@ -41,7 +41,7 @@ def initialize_simulation():
             _env = None
     return _env
 
-def step_env(state: Dict[str, Any]) -> Dict[str, Any]:
+async def step_env(state: Dict[str, Any]) -> Dict[str, Any]:
     """Step the real physics simulation and extract telemetry"""
     gname="sensor_graph"; nname="step_env"
     t0=time.time(); node_runs_total.labels(gname,nname).inc()
@@ -153,7 +153,7 @@ def step_env(state: Dict[str, Any]) -> Dict[str, Any]:
         node_duration_seconds.labels(gname,nname).observe(time.time()-t0)
         return {"temps": temps, "meta": meta, "ts": time.time()}
 
-def receive_actions(state: Dict[str, Any]) -> Dict[str, Any]:
+async def receive_actions(state: Dict[str, Any]) -> Dict[str, Any]:
     """Receive and prepare actions for next simulation step"""
     gname="sensor_graph"; nname="receive_actions"
     t0=time.time(); node_runs_total.labels(gname,nname).inc()
@@ -171,7 +171,7 @@ def receive_actions(state: Dict[str, Any]) -> Dict[str, Any]:
         node_duration_seconds.labels(gname,nname).observe(time.time()-t0)
         return state
 
-def publish_state(state: Dict[str, Any]) -> Dict[str, Any]:
+async def publish_state(state: Dict[str, Any]) -> Dict[str, Any]:
     """Publish sensor telemetry to NATS"""
     gname="sensor_graph"; nname="publish_state"
     t0=time.time(); node_runs_total.labels(gname,nname).inc()
@@ -186,8 +186,8 @@ def publish_state(state: Dict[str, Any]) -> Dict[str, Any]:
         }
         
         # Publish to multiple topics for different consumers
-        asyncio.run(nats_publish(ROUTING["state_out"], payload, agent="sensor"))
-        asyncio.run(nats_publish("simulation.state", payload, agent="sensor"))  # For compatibility
+        await nats_publish(ROUTING["state_out"], payload, agent="sensor")
+        await nats_publish("simulation.state", payload, agent="sensor")  # For compatibility
         
         # Store latest state for other services
         set_latest_state(state)
@@ -215,3 +215,4 @@ def inject_control_actions(actions):
     global _current_actions
     _current_actions = actions
     log.info(f"Injected control actions: {list(actions.keys()) if actions else 'None'}")
+    

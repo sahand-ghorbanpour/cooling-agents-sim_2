@@ -15,7 +15,7 @@ log = logging.getLogger("control-graph")
 
 TARGET_TEMP = float(os.getenv("TARGET_TEMP_C", "24.0"))
 
-def get_state(state: Dict[str, Any]) -> Dict[str, Any]:
+async def get_state(state: Dict[str, Any]) -> Dict[str, Any]:
     """Get current system state and control context"""
     gname="control_graph"; nname="get_state"
     t0=time.time(); node_runs_total.labels(gname,nname).inc()
@@ -51,7 +51,7 @@ def get_state(state: Dict[str, Any]) -> Dict[str, Any]:
         node_duration_seconds.labels(gname,nname).observe(time.time()-t0)
         return state
 
-def guardrails_validate(state: Dict[str, Any]) -> Dict[str, Any]:
+async def guardrails_validate(state: Dict[str, Any]) -> Dict[str, Any]:
     """Validate system state and control safety"""
     gname="control_graph"; nname="guardrails_validate"
     t0=time.time(); node_runs_total.labels(gname,nname).inc()
@@ -97,7 +97,7 @@ def guardrails_validate(state: Dict[str, Any]) -> Dict[str, Any]:
         node_duration_seconds.labels(gname,nname).observe(time.time()-t0)
         return state
 
-def llm_coordination(state: Dict[str, Any]) -> Dict[str, Any]:
+async def llm_coordination(state: Dict[str, Any]) -> Dict[str, Any]:
     """Coordinate with LLM for high-level control strategy"""
     gname="control_graph"; nname="llm_coordination"
     t0=time.time(); node_runs_total.labels(gname,nname).inc()
@@ -188,7 +188,7 @@ def llm_coordination(state: Dict[str, Any]) -> Dict[str, Any]:
         node_duration_seconds.labels(gname,nname).observe(time.time()-t0)
         return state
 
-def coordinate_runtime(state: Dict[str, Any]) -> Dict[str, Any]:
+async def coordinate_runtime(state: Dict[str, Any]) -> Dict[str, Any]:
     """Send coordination signals to control runtime service"""
     gname="control_graph"; nname="coordinate_runtime"
     t0=time.time(); node_runs_total.labels(gname,nname).inc()
@@ -240,7 +240,7 @@ def coordinate_runtime(state: Dict[str, Any]) -> Dict[str, Any]:
             coordination["llm_direct_actions"] = strategy["llm_actions"]
         
         # Publish coordination to runtime service
-        asyncio.run(nats_publish("dc.control.coordinate", coordination, agent="control_coordinator"))
+        await nats_publish("dc.control.coordinate", coordination, agent="control_coordinator")
         
         # Also send targets to orchestrator topic for visibility
         if "llm_targets" in coordination:
@@ -249,14 +249,14 @@ def coordinate_runtime(state: Dict[str, Any]) -> Dict[str, Any]:
                 "strategy": coordination.get("strategy", "coordinated"),
                 "source": "control_graph"
             }
-            asyncio.run(nats_publish(ROUTING["orch_targets"], target_payload, agent="control"))
+            await nats_publish(ROUTING["orch_targets"], target_payload, agent="control")
         
         state["coordination_sent"] = coordination
         
         node_duration_seconds.labels(gname,nname).observe(time.time()-t0)
         return state
 
-def monitor_and_adapt(state: Dict[str, Any]) -> Dict[str, Any]:
+async def monitor_and_adapt(state: Dict[str, Any]) -> Dict[str, Any]:
     """Monitor control performance and adapt parameters"""
     gname="control_graph"; nname="monitor_and_adapt"
     t0=time.time(); node_runs_total.labels(gname,nname).inc()
