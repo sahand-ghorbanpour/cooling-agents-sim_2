@@ -308,7 +308,7 @@ async def generate_cooling_tower_action(global_temp: float, global_error: float)
     }
 
 def convert_to_simulation_actions(actions: Dict[str, Any]) -> Dict[str, Any]:
-    """Convert control actions to simulation format"""
+    """Convert control actions to simulation format - CORRECTED"""
     sim_actions = {}
     
     # Convert cabinet actions
@@ -318,27 +318,34 @@ def convert_to_simulation_actions(actions: Dict[str, Any]) -> Dict[str, Any]:
         
         if cabinet_key in actions:
             action_data = actions[cabinet_key]
-            fan_pct = action_data["fan_pct"]
+            fan_pct = action_data["fan_pct"]  # 0-100%
             
-            # Convert fan percentage to simulation action format
-            # [sec_temp, pressure, valve1, valve2, valve3]
-            sec_temp = (fan_pct - 50.0) / 100.0  # Normalize to [-0.5, 0.5]
-            pressure = 0.1  # Default pressure
+            # CORRECT: Secondary temperature in [-1, 1] range
+            # Lower fan speed = higher secondary temp (less cooling)
+            sec_temp = np.clip(2.0 * (50.0 - fan_pct) / 100.0, -1.0, 1.0)
             
-            # Valve positions based on fan speed (higher speed = more flow)
-            primary_flow = min(0.5, fan_pct / 200.0 + 0.2)
-            secondary_flow = min(0.4, fan_pct / 250.0 + 0.1)
-            bypass_flow = 1.0 - primary_flow - secondary_flow
+            # CORRECT: Pressure differential in [-1, 1] range  
+            pressure = np.clip((fan_pct - 50.0) / 50.0, -1.0, 1.0)
+            
+            # CRITICAL FIX: Valve positions in [-1, 1] but BEFORE softmax
+            # SmallFrontierModel applies softmax, so we pass raw logits
+            # Higher fan speed = prefer primary valve (higher logit)
+            cooling_intensity = (fan_pct - 30.0) / 70.0  # 0-1 for 30-100% fan
+            
+            # Raw logits that will be softmax-normalized by the model
+            valve1_logit = np.clip(1.0 + cooling_intensity * 2.0, -1.0, 1.0)   # Primary cooling
+            valve2_logit = np.clip(0.0 + cooling_intensity * 1.0, -1.0, 1.0)   # Secondary
+            valve3_logit = np.clip(-0.5 - cooling_intensity * 1.5, -1.0, 1.0)  # Bypass
             
             sim_actions[sim_key] = np.array([
-                sec_temp,
-                pressure, 
-                primary_flow,
-                secondary_flow,
-                bypass_flow
+                sec_temp,        # [-1, 1] secondary temperature setpoint
+                pressure,        # [-1, 1] pressure differential  
+                valve1_logit,    # [-1, 1] will be softmaxed by model
+                valve2_logit,    # [-1, 1] will be softmaxed by model
+                valve3_logit     # [-1, 1] will be softmaxed by model
             ], dtype=np.float32)
     
-    # Convert cooling tower action
+    # Cooling tower action (discrete 0-8) - this was correct
     if "cooling_tower" in actions:
         ct_data = actions["cooling_tower"]
         sim_actions["cooling-tower-1"] = ct_data["discrete_action"]
