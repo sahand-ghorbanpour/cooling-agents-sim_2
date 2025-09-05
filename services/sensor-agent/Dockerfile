@@ -1,43 +1,30 @@
 # services/sensor-agent/Dockerfile
 FROM continuumio/miniconda3:latest
 
-LABEL maintainer="Cooling System Team"
-LABEL description="Physics Simulation Service with FMU Support"
-
 WORKDIR /app
+ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies for FMU
+# System deps
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    gfortran \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+    build-essential gfortran curl \
+ && rm -rf /var/lib/apt/lists/*
 
-# Install conda packages for FMU support (CRITICAL!)
-RUN conda install -c conda-forge pyfmi=2.16.2 numpy pandas -y
+ RUN conda install -c conda-forge pyfmi=2.16.2 numpy pandas -y
 
-# Install remaining packages via pip
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy only what we need early to leverage caching
+# (adjust these paths to match where you placed the files)
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Copy simulation code and environment
-COPY services/sensor-agent/ ./services/sensor-agent/
-COPY env/ ./env/  # Your FMU files
-COPY common/ ./common/
-
-# Create simulation data directory
+# If you have python package code to copy (keep this narrow for caching)
+COPY . /app/services/sensor-agent/
 RUN mkdir -p /app/simulation_data
 
-# Set environment variables
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
-
-# Health check using your actual environment
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python -c "from env.frontier_env import SmallFrontierModel; env = SmallFrontierModel(); print('FMU OK')" || exit 1
-
-# Expose metrics port
 EXPOSE 9012
 
-# Run the sensor agent service
+# Healthcheck is fine as you had it, or omit during build-debug:
+# HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+#   CMD python -c "from env.frontier_env import SmallFrontierModel; print('FMU OK')" || exit 1
 CMD ["python", "services/sensor-agent/main.py"]

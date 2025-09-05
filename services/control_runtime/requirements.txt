@@ -1,5 +1,8 @@
 # ========== Message Bus and Communication ==========
 nats-py==2.6.0
+redis==5.0.7
+aiohttp==3.9.5
+httpx==0.27.0
 
 # ========== HTTP Client ==========
 requests==2.32.3

@@ -1,4 +1,3 @@
-# ========== services/llm-gateway/Dockerfile ==========
 FROM python:3.11-slim
 
 LABEL maintainer="Cooling System Team"
@@ -17,9 +16,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY services/llm-gateway/ ./services/llm-gateway/
-COPY common/ ./common/
+# Copy application code to the correct location
+COPY . /app/
 
 # Set environment variables
 ENV PYTHONPATH=/app
@@ -32,5 +30,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 # Expose port
 EXPOSE 9000
 
-# Run the application
-CMD ["uvicorn", "services.llm_gateway.main:app", "--host", "0.0.0.0", "--port", "9000"]
+# Run the application - adjust the module path
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9000"]

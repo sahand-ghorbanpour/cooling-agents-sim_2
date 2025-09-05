@@ -1,3 +1,4 @@
+ #services/sensor-gateway/main.py
 import asyncio, json, os, logging, time
 from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, HTTPException
@@ -459,7 +460,7 @@ if __name__ == "__main__":
     import uvicorn
     # Run FastAPI and sensor loop together
     config = uvicorn.Config(
-        "sensor_gateway:app", 
+        "__main__:app",  # Changed from "sensor_gateway:app" to "__main__:app"
         host="0.0.0.0", 
         port=int(os.getenv("SENSOR_GATEWAY_PORT", "9011")),
         log_level="info"

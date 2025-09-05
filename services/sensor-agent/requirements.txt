@@ -1,6 +1,9 @@
 # services/sensor-agent/requirements.txt
 # ========== Message Bus and Communication ==========
 nats-py==2.6.0
+redis==5.0.7
+aiohttp==3.9.5
+httpx==0.27.0
 
 # ========== Scientific Computing ==========
 numpy==1.26.4  # Already available from conda, but ensure version
@@ -19,3 +22,6 @@ python-json-logger==2.0.7
 # ========== Version Pinning for Stability ==========
 typing-extensions==4.8.0
 setuptools==68.2.0
+
+
+

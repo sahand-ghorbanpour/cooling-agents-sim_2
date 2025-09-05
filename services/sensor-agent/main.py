@@ -1,11 +1,11 @@
-# services/sensor-agent/main.py - External physics simulation service
+# services/sensor-agent/main.py - Fixed JSON serialization and optimized flow
 import asyncio, json, os, time, logging
 import numpy as np
 from nats.aio.client import Client as NATS
 from prometheus_client import start_http_server, Counter, Histogram
 from common.logging import setup_json_logging
-from common.config import get_config
-
+from common.config import get_config, set_latest_state
+from typing import Dict
 # Import your physics simulation
 from env.frontier_env import SmallFrontierModel
 
@@ -16,6 +16,21 @@ start_http_server(int(os.getenv("METRICS_PORT", "9012")))
 simulation_steps = Counter('simulation_steps_total', 'Total simulation steps')
 simulation_duration = Histogram('simulation_step_duration_seconds', 'Time per simulation step')
 simulation_errors = Counter('simulation_errors_total', 'Simulation errors', ['error_type'])
+
+def numpy_to_json_safe(obj):
+    """Convert numpy arrays and other non-serializable objects to JSON-safe format"""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, dict):
+        return {k: numpy_to_json_safe(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [numpy_to_json_safe(item) for item in obj]
+    else:
+        return obj
 
 class SensorAgentService:
     def __init__(self):
@@ -47,32 +62,10 @@ class SensorAgentService:
         self.nc = NATS()
         await self.nc.connect(servers=os.getenv("NATS_URL","nats://nats:4222"))
         
-        # Subscribe to triggers from LangGraph sensor_graph
-        await self.nc.subscribe("simulation.trigger", cb=self.handle_trigger)
-        
         # Subscribe to control actions from control system  
-        await self.nc.subscribe("simulation.actions", cb=self.handle_control_actions)
         await self.nc.subscribe("dc.control.actions", cb=self.handle_control_actions)
         
         log.info("Sensor agent service initialized and subscribed to NATS")
-    
-    async def handle_trigger(self, msg):
-        """Handle simulation trigger from sensor_graph"""
-        try:
-            payload = json.loads(msg.data.decode())
-            log.debug("Received simulation trigger from sensor_graph")
-            
-            # Extract control actions if provided
-            control_actions = payload.get("control_actions")
-            if control_actions:
-                self.current_actions = control_actions
-            
-            # Execute simulation step
-            await self.step_simulation()
-            
-        except Exception as e:
-            log.error(f"Error handling simulation trigger: {e}")
-            simulation_errors.labels(error_type='trigger_handling').inc()
     
     async def handle_control_actions(self, msg):
         """Handle control actions from control runtime"""
@@ -98,7 +91,13 @@ class SensorAgentService:
                 # Use received actions or defaults
                 if self.current_actions:
                     actions = self.current_actions
-                    self.current_actions = None  # Reset after use
+                    self.current_actions = None
+                    
+                    # Convert lists to numpy arrays for simulation environment
+                    for key, action in actions.items():
+                        if isinstance(action, (list, tuple)) and key.startswith('cdu-cabinet-'):
+                            actions[key] = np.array(action, dtype=np.float32)
+                    
                 else:
                     # Default actions - maintain current state
                     actions = {
@@ -107,7 +106,7 @@ class SensorAgentService:
                         'cdu-cabinet-3': np.array([0.0, 0.0, 1/3, 1/3, 1/3], dtype=np.float32),
                         'cdu-cabinet-4': np.array([0.0, 0.0, 1/3, 1/3, 1/3], dtype=np.float32),
                         'cdu-cabinet-5': np.array([0.0, 0.0, 1/3, 1/3, 1/3], dtype=np.float32),
-                        'cooling-tower-1': 4  # Maintain
+                        'cooling-tower-1': 4
                     }
                 
                 # Step simulation
@@ -142,7 +141,7 @@ class SensorAgentService:
                         fan_power = np.sum(ct_obs[:2])
                         total_energy = float((fan_power + 2) / 4 * 150)
                 
-                # Prepare simulation state
+                # Prepare simulation state with JSON-safe conversion
                 simulation_state = {
                     "temps": temps,
                     "meta": {
@@ -150,14 +149,14 @@ class SensorAgentService:
                         "step_count": self.step_count,
                         "rewards": {k: float(v) for k, v in rewards.items()},
                         "simulation_time": self.env.current_time if hasattr(self.env, 'current_time') else self.step_count * 15.0,
-                        "actions_applied": actions
+                        "actions_applied": numpy_to_json_safe(actions)  # Convert numpy arrays
                     },
                     "timestamp": time.time(),
                     "source": "sensor_agent_service"
                 }
                 
-                # Publish simulation state
-                await self.publish_simulation_state(simulation_state)
+                # Publish optimized - directly to final destination
+                await self.publish_optimized_state(simulation_state)
                 
                 # Update internal state
                 self.last_state = simulation_state
@@ -177,23 +176,31 @@ class SensorAgentService:
                     "timestamp": time.time(),
                     "source": "sensor_agent_service_fallback"
                 }
-                await self.publish_simulation_state(fallback_state)
+                await self.publish_optimized_state(fallback_state)
     
-    async def publish_simulation_state(self, state: Dict):
-        """Publish simulation state to NATS for consumption by sensor_graph"""
+    async def publish_optimized_state(self, state: Dict):
+        """Optimized publishing - direct to destinations, no intermediate hops"""
         try:
-            # Publish to topic that sensor_graph listens to
-            await self.nc.publish("simulation.state.raw", json.dumps(state).encode())
+            # Convert to JSON-safe format
+            json_safe_state = numpy_to_json_safe(state)
+            state_json = json.dumps(json_safe_state).encode()
             
-            # Also publish to general telemetry topic
-            await self.nc.publish("dc.sensor.telemetry.raw", json.dumps(state).encode())
+            # Publish directly to final destinations (eliminates bridge hop)
+            await self.nc.publish("dc.telemetry.state", state_json)
             
-            # NOTE: Direct import won't work across containers
-            # The sensor_graph will receive updates via NATS subscription
-            # No direct function call needed - NATS messaging handles coordination
+            # Store directly in Redis (eliminates graph processing hop)
+            clean_data = {
+                "temps": json_safe_state.get("temps", {}),
+                "meta": json_safe_state.get("meta", {}),
+                "ts": json_safe_state.get("timestamp", time.time())
+            }
+            set_latest_state(clean_data)
+            
+            log.debug("Published optimized simulation state")
             
         except Exception as e:
             log.error(f"Failed to publish simulation state: {e}")
+            simulation_errors.labels(error_type='publish_failed').inc()
     
     async def run_autonomous_mode(self):
         """Run simulation autonomously when not triggered"""
